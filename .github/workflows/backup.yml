@@ -1,0 +1,137 @@
+name: Backup
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Verification mode
+        required: true
+        type: choice
+        options:
+          - synthetic
+          - production
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-backup
+  cancel-in-progress: false
+
+jobs:
+  synthetic:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'synthetic' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production-backup
+    env:
+      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+      BACKUP_BLOB_PREFIX: synthetic/${{ github.run_id }}-${{ github.run_attempt }}/
+      BACKUP_MODE: synthetic
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.8.0'
+          cache: npm
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.6'
+          cache: false
+      - name: Install dependencies and pinned age
+        shell: bash
+        env:
+          GOBIN: ${{ runner.temp }}/age-bin
+        run: |
+          npm ci --ignore-scripts
+          go install filippo.io/age/cmd/age@482cf6fc9babd3ab06f6606762aac10447222201
+          go install filippo.io/age/cmd/age-keygen@482cf6fc9babd3ab06f6606762aac10447222201
+          echo "$GOBIN" >> "$GITHUB_PATH"
+          "$GOBIN/age" --version | grep -F 'v1.2.1'
+      - name: Create ephemeral synthetic recovery identity
+        id: identity
+        shell: bash
+        env:
+          GOBIN: ${{ runner.temp }}/age-bin
+        run: |
+          identity="$RUNNER_TEMP/synthetic-age-identity.txt"
+          "$GOBIN/age-keygen" --output "$identity" 2> "$RUNNER_TEMP/age-keygen.log"
+          recipient="$("$GOBIN/age-keygen" -y "$identity")"
+          echo "BACKUP_AGE_RECIPIENT=$recipient" >> "$GITHUB_ENV"
+      - name: Create synthetic ciphertext
+        id: backup
+        shell: bash
+        run: scripts/create-encrypted-logical-backup.sh
+      - name: Upload and verify private ciphertext
+        id: store
+        shell: bash
+        run: |
+          pathname="$(node scripts/blob-control.mjs store '${{ steps.backup.outputs.encrypted_path }}')"
+          echo "pathname=$pathname" >> "$GITHUB_OUTPUT"
+      - name: Delete synthetic ciphertext
+        if: always() && steps.store.outputs.pathname != ''
+        shell: bash
+        run: node scripts/blob-control.mjs delete '${{ steps.store.outputs.pathname }}'
+
+  production:
+    if: (github.event_name == 'schedule' || inputs.mode == 'production') && github.ref == 'refs/heads/main' && vars.BACKUP_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production-backup
+    env:
+      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+      BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+      BACKUP_AGE_RECIPIENT: ${{ vars.BACKUP_AGE_RECIPIENT }}
+      BACKUP_SCHEMA_AND_DATA: ${{ vars.BACKUP_SCHEMA_AND_DATA }}
+      BACKUP_SCHEMA_ONLY: ${{ vars.BACKUP_SCHEMA_ONLY }}
+      BACKUP_BLOB_PREFIX: ${{ vars.BACKUP_NAMESPACE }}/
+      BACKUP_MODE: production
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.8.0'
+          cache: npm
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.6'
+          cache: false
+      - name: Install controller dependencies
+        shell: bash
+        run: npm ci --ignore-scripts
+      - name: Install pinned Supabase CLI
+        shell: bash
+        env:
+          SUPABASE_CLI_SHA256: 5b3031cb297d51b25be4c284e4c852254460ec722ec221d3b81b07d55acfd158
+          SUPABASE_CLI_VERSION: 2.116.0
+        run: |
+          install_dir="$RUNNER_TEMP/supabase-bin"
+          archive="$RUNNER_TEMP/supabase_linux_amd64.tar.gz"
+          mkdir -p "$install_dir"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output "$archive" "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          echo "$SUPABASE_CLI_SHA256  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$install_dir" supabase
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/supabase" --version | grep -Fx "$SUPABASE_CLI_VERSION"
+      - name: Install pinned age
+        shell: bash
+        env:
+          GOBIN: ${{ runner.temp }}/age-bin
+        run: |
+          go install filippo.io/age/cmd/age@482cf6fc9babd3ab06f6606762aac10447222201
+          echo "$GOBIN" >> "$GITHUB_PATH"
+          "$GOBIN/age" --version | grep -F 'v1.2.1'
+      - name: Create encrypted logical backup
+        id: backup
+        shell: bash
+        run: scripts/create-encrypted-logical-backup.sh
+      - name: Store and verify private ciphertext
+        shell: bash
+        run: node scripts/blob-control.mjs store '${{ steps.backup.outputs.encrypted_path }}'
+
