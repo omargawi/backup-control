@@ -13,6 +13,7 @@ test('workflows are immutable, least privilege, main-only, and environment prote
     assert.match(workflow, /permissions:\n  contents: read/)
   }
   const backup = read('.github/workflows/backup.yml')
+  assert.match(backup, /\n  synthetic:[\s\S]*?run: bash scripts\/create-encrypted-logical-backup\.sh[\s\S]*?\n  production:[\s\S]*?run: bash scripts\/create-encrypted-logical-backup\.sh/)
   assert.match(backup, /environment: production-backup/)
   assert.match(backup, /github\.ref == 'refs\/heads\/main'/)
   assert.doesNotMatch(backup, /upload-artifact/)
