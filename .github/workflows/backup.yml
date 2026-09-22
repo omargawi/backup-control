@@ -65,7 +65,7 @@ jobs:
       - name: Create synthetic ciphertext
         id: backup
         shell: bash
-        run: scripts/create-encrypted-logical-backup.sh
+        run: bash scripts/create-encrypted-logical-backup.sh
       - name: Upload and verify private ciphertext
         id: store
         shell: bash
@@ -130,7 +130,7 @@ jobs:
       - name: Create encrypted logical backup
         id: backup
         shell: bash
-        run: scripts/create-encrypted-logical-backup.sh
+        run: bash scripts/create-encrypted-logical-backup.sh
       - name: Store and verify private ciphertext
         shell: bash
         run: node scripts/blob-control.mjs store '${{ steps.backup.outputs.encrypted_path }}'
