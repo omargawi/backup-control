@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto'
 import { createReadStream, statSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 import { del, get, head, list, put } from '@vercel/blob'
 
@@ -107,7 +108,17 @@ async function hashStream(stream) {
   return hash.digest('hex')
 }
 
-export async function storeCiphertext(path, env = process.env) {
+async function bufferAndHashStream(stream) {
+  const hash = createHash('sha256')
+  const chunks = []
+  for await (const chunk of stream) {
+    hash.update(chunk)
+    chunks.push(Buffer.from(chunk))
+  }
+  return { bytes: Buffer.concat(chunks), hash: hash.digest('hex') }
+}
+
+export async function storeCiphertext(path, env = process.env, downloadedPath) {
   const token = env.BLOB_READ_WRITE_TOKEN
   if (!token) throw new Error('BLOB_READ_WRITE_TOKEN is required')
   const config = configuration(env)
@@ -143,7 +154,14 @@ export async function storeCiphertext(path, env = process.env) {
       throw new Error('Uploaded ciphertext metadata does not match the local artifact')
     }
     const downloaded = await get(uploaded.pathname, { access: 'private', token, useCache: false })
-    if (!downloaded?.stream || (await hashStream(downloaded.stream)) !== localHash) {
+    if (!downloaded?.stream) throw new Error('Authenticated ciphertext download failed')
+    if (downloadedPath) {
+      const verified = await bufferAndHashStream(downloaded.stream)
+      if (verified.hash !== localHash) {
+        throw new Error('Authenticated ciphertext integrity verification failed')
+      }
+      await writeFile(downloadedPath, verified.bytes, { flag: 'wx', mode: 0o600 })
+    } else if ((await hashStream(downloaded.stream)) !== localHash) {
       throw new Error('Authenticated ciphertext integrity verification failed')
     }
   } catch (error) {
@@ -179,9 +197,9 @@ export async function verifyFreshness(env = process.env) {
 }
 
 async function main() {
-  const [command, argument] = process.argv.slice(2)
+  const [command, argument, downloadedPath] = process.argv.slice(2)
   if (command === 'store' && argument) {
-    console.log(await storeCiphertext(argument))
+    console.log(await storeCiphertext(argument, process.env, downloadedPath))
     return
   }
   if (command === 'freshness') {
@@ -197,7 +215,7 @@ async function main() {
     await del(argument, { token, ifMatch: metadata.etag })
     return
   }
-  throw new Error('usage: blob-control.mjs store FILE | freshness | delete PATHNAME')
+  throw new Error('usage: blob-control.mjs store FILE [DOWNLOADED_FILE] | freshness | delete PATHNAME')
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
