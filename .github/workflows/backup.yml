@@ -62,6 +62,7 @@ jobs:
           "$GOBIN/age-keygen" --output "$identity" 2> "$RUNNER_TEMP/age-keygen.log"
           recipient="$("$GOBIN/age-keygen" -y "$identity")"
           echo "BACKUP_AGE_RECIPIENT=$recipient" >> "$GITHUB_ENV"
+          echo "SYNTHETIC_AGE_IDENTITY=$identity" >> "$GITHUB_ENV"
       - name: Create synthetic ciphertext
         id: backup
         shell: bash
@@ -70,12 +71,60 @@ jobs:
         id: store
         shell: bash
         run: |
-          pathname="$(node scripts/blob-control.mjs store '${{ steps.backup.outputs.encrypted_path }}')"
+          downloaded="$RUNNER_TEMP/synthetic-ciphertext.age"
+          pathname="$(node scripts/blob-control.mjs store '${{ steps.backup.outputs.encrypted_path }}' "$downloaded")"
           echo "pathname=$pathname" >> "$GITHUB_OUTPUT"
+      - name: Decrypt and verify downloaded synthetic backup
+        shell: bash
+        run: |
+          verification_dir="$RUNNER_TEMP/synthetic-verification"
+          archive="$verification_dir/logical-backup.tar.gz"
+          extracted="$verification_dir/extracted"
+          mkdir -m 700 -p "$extracted"
+
+          age --decrypt \
+            --identity "$SYNTHETIC_AGE_IDENTITY" \
+            --output "$archive" \
+            "$RUNNER_TEMP/synthetic-ciphertext.age"
+
+          expected_members="$(printf '%s\n' SHA256SUMS data.sql manifest.json schema.sql)"
+          actual_members="$(tar -tzf "$archive" | LC_ALL=C sort)"
+          if [[ "$actual_members" != "$expected_members" ]]; then
+            echo 'Decrypted archive contains an unexpected member set.' >&2
+            exit 1
+          fi
+
+          tar --extract --gzip --file "$archive" --directory "$extracted" \
+            --no-same-owner --no-same-permissions
+          (
+            cd "$extracted"
+            sha256sum --check --strict SHA256SUMS
+            printf '%s\n' 'CREATE TABLE public.synthetic_backup_probe (id integer);' | cmp - schema.sql
+            printf '%s\n' 'COPY public.synthetic_backup_probe (id) FROM stdin;' '1' '\\.' | cmp - data.sql
+            jq -e --arg source_ref "$GITHUB_SHA" '
+              .format_version == 1 and
+              .source_ref == $source_ref and
+              .mode == "synthetic" and
+              .dump_tool == "synthetic" and
+              .schema_and_data == ["public"] and
+              .schema_only == ["private"] and
+              (.created_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+            ' manifest.json > /dev/null
+          )
+          echo 'Synthetic decryption and content verification passed.'
       - name: Delete synthetic ciphertext
         if: always() && steps.store.outputs.pathname != ''
         shell: bash
         run: node scripts/blob-control.mjs delete '${{ steps.store.outputs.pathname }}'
+      - name: Remove ephemeral synthetic verification files
+        if: always()
+        shell: bash
+        run: |
+          rm -f -- \
+            "$RUNNER_TEMP/synthetic-age-identity.txt" \
+            "$RUNNER_TEMP/age-keygen.log" \
+            "$RUNNER_TEMP/synthetic-ciphertext.age"
+          rm -rf -- "$RUNNER_TEMP/synthetic-verification"
 
   production:
     if: (github.event_name == 'schedule' || inputs.mode == 'production') && github.ref == 'refs/heads/main' && vars.BACKUP_ENABLED == 'true'
@@ -134,4 +183,3 @@ jobs:
       - name: Store and verify private ciphertext
         shell: bash
         run: node scripts/blob-control.mjs store '${{ steps.backup.outputs.encrypted_path }}'
-
