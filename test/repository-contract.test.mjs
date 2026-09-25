@@ -51,3 +51,14 @@ test('published files contain no application-specific material or credentials', 
   assert.doesNotMatch(source, /postgres(?:ql)?:\/\/[^\s"']+@/i)
   assert.doesNotMatch(source, /BLOB_READ_WRITE_TOKEN\s*[:=]\s*['"][^$]/)
 })
+
+test('production dump uses a pinned client, TLS, and RLS-visible inserts', () => {
+  const workflow = read('.github/workflows/backup.yml')
+  const script = read('scripts/create-encrypted-logical-backup.sh')
+  assert.match(workflow, /BACKUP_PGDUMP_IMAGE: postgres@sha256:[0-9a-f]{64}/)
+  assert.match(workflow, /Verify pinned PostgreSQL client/)
+  assert.match(script, /pg_stat_ssl where pid = pg_backend_pid\(\)/)
+  assert.match(script, /--data-only --enable-row-security --inserts/)
+  assert.match(script, /--schema-only --file=\/backup\/schema\.sql/)
+  assert.doesNotMatch(script, /supabase db dump|--use-copy/i)
+})
