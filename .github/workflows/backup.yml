@@ -138,6 +138,7 @@ jobs:
       BACKUP_SCHEMA_AND_DATA: ${{ vars.BACKUP_SCHEMA_AND_DATA }}
       BACKUP_SCHEMA_ONLY: ${{ vars.BACKUP_SCHEMA_ONLY }}
       BACKUP_BLOB_PREFIX: ${{ vars.BACKUP_NAMESPACE }}/
+      BACKUP_PGDUMP_IMAGE: postgres@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929
       BACKUP_MODE: production
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -154,20 +155,11 @@ jobs:
       - name: Install controller dependencies
         shell: bash
         run: npm ci --ignore-scripts
-      - name: Install pinned Supabase CLI
+      - name: Verify pinned PostgreSQL client
         shell: bash
-        env:
-          SUPABASE_CLI_SHA256: 5b3031cb297d51b25be4c284e4c852254460ec722ec221d3b81b07d55acfd158
-          SUPABASE_CLI_VERSION: 2.116.0
         run: |
-          install_dir="$RUNNER_TEMP/supabase-bin"
-          archive="$RUNNER_TEMP/supabase_linux_amd64.tar.gz"
-          mkdir -p "$install_dir"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output "$archive" "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
-          echo "$SUPABASE_CLI_SHA256  $archive" | sha256sum --check --strict
-          tar -xzf "$archive" -C "$install_dir" supabase
-          echo "$install_dir" >> "$GITHUB_PATH"
-          "$install_dir/supabase" --version | grep -Fx "$SUPABASE_CLI_VERSION"
+          docker pull "$BACKUP_PGDUMP_IMAGE"
+          docker run --rm --entrypoint pg_dump "$BACKUP_PGDUMP_IMAGE" --version | grep -F '17.6'
       - name: Install pinned age
         shell: bash
         env:
