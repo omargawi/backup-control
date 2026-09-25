@@ -16,8 +16,10 @@ the protected `main` branch, and configure:
 | `BACKUP_ENABLED` | repository variable | Exact value `true` activates Production jobs |
 
 The database role must be `LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE`
-with only the schema `USAGE` and table/sequence `SELECT` needed for the declared
-scope. Grant matching default privileges for future tables and sequences. It
+with `USAGE` and table/sequence `SELECT` only on the data-bearing application
+schemas. Schema-only definitions can be dumped from catalog metadata without
+runtime `USAGE` on a private function schema. Grant matching default privileges
+for future data tables and sequences. It
 must have no write, platform-schema, Auth, Storage, or function-execution
 privilege. Rotate its independent password through the environment secret.
 Keep `NOBYPASSRLS`; add a SELECT policy for this role to every application
