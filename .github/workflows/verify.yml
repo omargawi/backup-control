@@ -22,4 +22,8 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run verify
-
+      - name: Verify pinned PostgreSQL dump image
+        run: |
+          image='postgres@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929'
+          docker pull "$image"
+          docker run --rm --entrypoint pg_dump "$image" --version | grep -F '17.6'
