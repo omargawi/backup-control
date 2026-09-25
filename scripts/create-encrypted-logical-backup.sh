@@ -56,12 +56,68 @@ if [[ "$mode" == production ]]; then
     echo 'BACKUP_SCHEMA_ONLY is not a safe schema list.' >&2
     exit 1
   }
-  command -v supabase >/dev/null
+  : "${BACKUP_PGDUMP_IMAGE:?A digest-pinned PostgreSQL 17 image is required}"
+  command -v docker >/dev/null
 
-  all_schemas="$BACKUP_SCHEMA_AND_DATA,$BACKUP_SCHEMA_ONLY"
-  supabase db dump --db-url "$BACKUP_DATABASE_URL" --schema "$all_schemas" --file "$backup_tmp/schema.sql"
-  supabase db dump --db-url "$BACKUP_DATABASE_URL" --data-only --schema "$BACKUP_SCHEMA_AND_DATA" --use-copy --file "$backup_tmp/data.sql"
-  tool_version="$(supabase --version)"
+  readiness_query="
+    select case when
+      (select ssl from pg_stat_ssl where pid = pg_backend_pid())
+      and not exists (
+        select 1 from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public' and c.relkind in ('r', 'p')
+          and (not c.relrowsecurity or not exists (
+            select 1 from pg_policy p
+            where p.polrelid = c.oid
+              and p.polname = 'backup_reader_select'
+              and p.polpermissive and p.polcmd in ('r', '*')
+              and p.polroles @> array[current_user::regrole::oid]
+          ))
+      )
+    then 'ready' else 'unsafe' end"
+  readiness="$(docker run --rm --network host --read-only --user "$(id -u):$(id -g)" \
+    --env BACKUP_DATABASE_URL --env PGSSLMODE=require \
+    --entrypoint /bin/sh "$BACKUP_PGDUMP_IMAGE" -ceu \
+    'psql "$BACKUP_DATABASE_URL" --no-psqlrc --tuples-only --no-align --command "$1"' sh "$readiness_query")"
+  if [[ "$readiness" != ready ]]; then
+    echo 'Backup requires TLS and a scoped SELECT policy on every public table.' >&2
+    exit 1
+  fi
+
+  dump() {
+    local output="$1"
+    docker run --rm --network host --read-only --user "$(id -u):$(id -g)" \
+      --mount "type=bind,source=$backup_tmp,target=/backup" \
+      --env BACKUP_DATABASE_URL --env BACKUP_SCHEMA_AND_DATA \
+      --env BACKUP_SCHEMA_ONLY --env PGSSLMODE=require \
+      --entrypoint /bin/sh "$BACKUP_PGDUMP_IMAGE" -ceu '
+        output="$1"
+        if [ "$output" = schema.sql ]; then
+          schemas="$BACKUP_SCHEMA_AND_DATA,$BACKUP_SCHEMA_ONLY"
+        else
+          schemas="$BACKUP_SCHEMA_AND_DATA"
+        fi
+        set --
+        for schema in $(printf "%s" "$schemas" | tr "," " "); do
+          set -- "$@" --schema="$schema"
+        done
+        if [ "$output" = schema.sql ]; then
+          pg_dump --dbname="$BACKUP_DATABASE_URL" --no-owner --no-privileges \
+            --schema-only --file=/backup/schema.sql "$@"
+        else
+          pg_dump --dbname="$BACKUP_DATABASE_URL" --no-owner --no-privileges \
+            --data-only --enable-row-security --inserts \
+            --file=/backup/data.sql "$@"
+        fi
+      ' sh "$output"
+  }
+
+  # The reader is deliberately NOBYPASSRLS. A dedicated SELECT policy for
+  # its role covers every declared application table. Row security must stay
+  # enabled in pg_dump; the default would fail rather than silently omit rows.
+  dump schema.sql
+  dump data.sql
+  tool_version="$(docker run --rm --entrypoint pg_dump "$BACKUP_PGDUMP_IMAGE" --version)"
 else
   printf '%s\n' 'CREATE TABLE public.synthetic_backup_probe (id integer);' > "$backup_tmp/schema.sql"
   printf '%s\n' 'COPY public.synthetic_backup_probe (id) FROM stdin;' '1' '\\.' > "$backup_tmp/data.sql"
@@ -122,4 +178,3 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
 fi
 
 echo "Created ciphertext: $encrypted_path"
-
